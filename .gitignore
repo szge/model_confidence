@@ -30,3 +30,8 @@
 *.exe
 *.out
 *.app
+
+# ignore libraries and models
+qwen2.5-7b
+llama.cpp
+cmake-build-debug
