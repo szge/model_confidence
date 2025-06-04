@@ -19,18 +19,14 @@ llama_model* init_model()
     return model;
 }
 
-llama_context* init_context(const int n_prompt, const int num_tokens_to_predict, llama_model* model)
+llama_context* init_context(llama_model* model)
 {
+    constexpr int n_ctx = 2048;
+    // initialize the context
     llama_context_params ctx_params = llama_context_default_params();
-    // n_ctx is the context size
-    ctx_params.n_ctx = n_prompt + num_tokens_to_predict - 1;
-    // n_batch is the maximum number of tokens that can be processed in a single call to llama_decode
-    ctx_params.n_batch = n_prompt;
-    // enable performance counters
-    ctx_params.no_perf = false;
-
-    llama_context* ctx = llama_init_from_model(model, ctx_params);
-    return ctx;
+    ctx_params.n_ctx = n_ctx;
+    ctx_params.n_batch = n_ctx;
+    return llama_init_from_model(model, ctx_params);
 }
 
 llama_sampler* init_sampler()
@@ -38,6 +34,9 @@ llama_sampler* init_sampler()
     auto sampler_params = llama_sampler_chain_default_params();
     sampler_params.no_perf = false;
     llama_sampler* smpl = llama_sampler_chain_init(sampler_params);
+    llama_sampler_chain_add(smpl, llama_sampler_init_min_p(0.05f, 1));
+    llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.8f));
+    llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
     return smpl;
 }
 
@@ -161,9 +160,14 @@ double get_model_confidence_score(const std::span<float> logits_view)
 
 int main() {
     const std::string prompt = "The 16th president of the United States was ";
-    constexpr int num_tokens_to_predict = 3;
-    std::vector<double> confidence_scores(num_tokens_to_predict);
-    confidence_scores.reserve(num_tokens_to_predict);
+    std::vector<double> confidence_scores {};
+
+    // only print errors
+    llama_log_set([](enum ggml_log_level level, const char * text, void * /* user_data */) {
+        if (level >= GGML_LOG_LEVEL_ERROR) {
+            fprintf(stderr, "%s", text);
+        }
+    }, nullptr);
 
     // load dynamic backends
     ggml_backend_load_all();
@@ -177,53 +181,47 @@ int main() {
 
     const llama_vocab* vocab = llama_model_get_vocab(model);
 
-    // tokenize the prompt
-
-    // find the number of tokens in the prompt
-    const int n_prompt = -llama_tokenize(vocab, prompt.c_str(), prompt.size(), NULL, 0, true, true);
-
-    // allocate space for the tokens and tokenize the prompt
-    std::vector<llama_token> prompt_tokens(n_prompt);
-    if (llama_tokenize(vocab, prompt.c_str(), prompt.size(), prompt_tokens.data(), prompt_tokens.size(), true, true) < 0) {
-        fprintf(stderr, "%s: error: failed to tokenize the prompt\n", __func__);
-        return 1;
-    }
-
     // initialize the context
-    llama_context* ctx = init_context(n_prompt, num_tokens_to_predict, model);
-
-    if (ctx == nullptr) {
+    llama_context* ctx = init_context(model);
+    if (!ctx) {
         fprintf(stderr , "%s: error: failed to create the llama_context\n" , __func__);
         return 1;
     }
 
     // initialize the sampler
     llama_sampler* smpl = init_sampler();
-    llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
 
-    // print the prompt token-by-token
-    const int print_prompt_status = print_prompt_tokens(prompt_tokens, vocab);
-    if (print_prompt_status) return print_prompt_status;
+    // helper function to evaluate a prompt and generate a response
+    auto generate = [&](const std::string & prompt) {
+        std::string response;
 
-    // prepare a batch for the prompt
-    llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
+        const bool is_first = llama_kv_self_seq_pos_max(ctx, 0) == 0;
 
-    // main loop
-    const auto t_main_start = ggml_time_us();
-    int n_decode = 0;
-    llama_token new_token_id;
-
-    for (int n_pos = 0; n_pos + batch.n_tokens < n_prompt + num_tokens_to_predict; ) {
-        // evaluate the current batch with the transformer model
-        if (llama_decode(ctx, batch)) {
-            fprintf(stderr, "%s : failed to eval, return code %d\n", __func__, 1);
-            return 1;
+        // tokenize the prompt
+        const int n_prompt_tokens = -llama_tokenize(vocab, prompt.c_str(), prompt.size(), NULL, 0, is_first, true);
+        std::vector<llama_token> prompt_tokens(n_prompt_tokens);
+        if (llama_tokenize(vocab, prompt.c_str(), prompt.size(), prompt_tokens.data(), prompt_tokens.size(), is_first, true) < 0) {
+            GGML_ABORT("failed to tokenize the prompt\n");
         }
 
-        n_pos += batch.n_tokens;
+        // prepare a batch for the prompt
+        llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
+        llama_token new_token_id;
+        while (true) {
+            // check if we have enough space in the context to evaluate this batch
+            int n_ctx = llama_n_ctx(ctx);
+            int n_ctx_used = llama_kv_self_seq_pos_max(ctx, 0);
+            if (n_ctx_used + batch.n_tokens > n_ctx) {
+                printf("\033[0m\n");
+                fprintf(stderr, "context size exceeded\n");
+                exit(0);
+            }
 
-        // sample the next token
-        {
+            if (llama_decode(ctx, batch)) {
+                GGML_ABORT("failed to decode\n");
+            }
+
+            // sample the next token
             new_token_id = llama_sampler_sample(smpl, ctx, -1);
 
             // is it an end of generation?
@@ -231,45 +229,92 @@ int main() {
                 break;
             }
 
-            char buf[128];
-            const int n = llama_token_to_piece(vocab, new_token_id, buf, sizeof(buf), 0, true);
+            // convert the token to a string, print it and add it to the response
+            char buf[256];
+            int n = llama_token_to_piece(vocab, new_token_id, buf, sizeof(buf), 0, true);
             if (n < 0) {
-                fprintf(stderr, "%s: error: failed to convert token to piece\n", __func__);
-                return 1;
+                GGML_ABORT("failed to convert token to piece\n");
             }
-            std::string s(buf, n);
-            printf("%s", s.c_str());
+            std::string piece(buf, n);
+            printf("%s", piece.c_str());
             fflush(stdout);
+            response += piece;
 
             float* logits = llama_get_logits(ctx);
             const std::span logits_view(logits, vocab->n_tokens());
-            // print_best_token(logits_view, vocab);
-            const double confidence_score = get_model_confidence_score(logits_view);
-            // std::cout << "\ntoken: \'" << s.c_str() << "\', score: " << confidence_score << "\n";
-            // should be the number of tokens generated after the prompt; range from 0 to num_tokens_to_predict - 1
-            const int curr_gen_idx = n_pos - n_prompt;
             // the main attraction
-            confidence_scores[curr_gen_idx] = get_model_confidence_score(logits_view);
+            confidence_scores.push_back(get_model_confidence_score(logits_view));
 
             // prepare the next batch with the sampled token
             batch = llama_batch_get_one(&new_token_id, 1);
+        }
 
-            n_decode += 1;
+        return response;
+    };
+
+    std::vector<llama_chat_message> messages;
+    std::vector<char> formatted(llama_n_ctx(ctx));
+    int prev_len = 0;
+    constexpr int max_turns = 1; // we only need 1 turn to get the model's response to the question
+    for (int turns = 0; turns < max_turns; turns++) {
+        const char * tmpl = llama_model_chat_template(model, /* name */ nullptr);
+
+        // On the very first turn, inject a system prompt
+        if (messages.empty()) {
+            // we need strdup since we free later
+            messages.push_back({"system", strdup("You are a helpful assistant that always replies concisely. Only reply with the direct answer to the question, without asking follow ups. Keep your answer as short as possible.")});
+            int new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
+            if (new_len > (int)formatted.size()) {
+                formatted.resize(new_len);
+                new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
+            }
+            if (new_len < 0) {
+                fprintf(stderr, "failed to apply the chat template\n");
+                return 1;
+            }
+        }
+        // get user input
+        printf("\033[32m> \033[0m");
+        std::string user;
+        std::getline(std::cin, user);
+
+        if (user.empty()) {
+            break;
+        }
+
+        // add the user input to the message list and format it
+        messages.push_back({"user", strdup(user.c_str())});
+        int new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
+        if (new_len > (int)formatted.size()) {
+            formatted.resize(new_len);
+            new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
+        }
+        if (new_len < 0) {
+            fprintf(stderr, "failed to apply the chat template\n");
+            return 1;
+        }
+
+        // remove previous messages to obtain the prompt to generate the response
+        std::string prompt(formatted.begin() + prev_len, formatted.begin() + new_len);
+
+        // generate a response
+        printf("\033[33m");
+        std::string response = generate(prompt);
+        printf("\n\033[0m");
+
+        // add the response to the messages
+        messages.push_back({"assistant", strdup(response.c_str())});
+        prev_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), false, nullptr, 0);
+        if (prev_len < 0) {
+            fprintf(stderr, "failed to apply the chat template\n");
+            return 1;
         }
     }
 
-    printf("\n");
-
-    const auto t_main_end = ggml_time_us();
-
-    fprintf(stderr, "%s: decoded %d tokens in %.2f s, speed: %.2f t/s\n",
-            __func__, n_decode, (t_main_end - t_main_start) / 1000000.0f, n_decode / ((t_main_end - t_main_start) / 1000000.0f));
-
-    fprintf(stderr, "\n");
-    llama_perf_sampler_print(smpl);
-    llama_perf_context_print(ctx);
-    fprintf(stderr, "\n");
-
+    // free resources
+    for (auto & msg : messages) {
+        free(const_cast<char *>(msg.content));
+    }
     llama_sampler_free(smpl);
     llama_free(ctx);
     llama_model_free(model);
