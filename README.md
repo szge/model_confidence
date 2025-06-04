@@ -1,6 +1,19 @@
 # model_confidence
 a minimal tool for generating a "confidence score" from a LLM's next token distribution
 
+this all began with my friend's question, "why can't LLMs know when they're hallucinating?"
+
+my thought was that you could try and get a sense of a model's confidence based on its token distribution.
+intuition: tighter distribution = more confidence, wider distribution = less confidence
+
+### how it works
+
+
+TODO:
+- add executable to makefile
+- accept command-line arguments (model path, window, input string)
+- benchmark (full logit sort vs top n)
+
 
 ### Instructions
 1. Clone repo i.e. `git clone https://github.com/szge/model_confidence.git`

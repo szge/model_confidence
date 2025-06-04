@@ -128,13 +128,34 @@ double get_model_confidence_score(const std::span<float> logits_view)
     // we use the top N (= 10 or 50 etc.) instead of the whole token vocab (which might be >100k)
     constexpr int score_window = 50;
     const std::vector<float> top_n_logits = get_top_n_logits(logits_view, score_window);
-    std::cout << "Top N logits:\n";
-    for (const auto logit : top_n_logits)
+    // std::cout << "Top N logits:\n";
+    // for (const auto logit : top_n_logits)
+    // {
+    //     std::cout << logit << " ";
+    // }
+    // std::cout << "\n\n";
+
+    // convert logits to a probability distribution but just for the top n tokens
+    std::vector<float> probs(score_window);
+    probs.reserve(score_window);
+    const float L_max = top_n_logits[0]; // use max logit for numerical stability
+
+    double normalizer = 0.0; // double for precision
+    double score = 0.0;
+    for (int i = 0; i < score_window; i++)
     {
-        std::cout << logit_to_prob(logit) << " ";
+        const float shifted = top_n_logits[i] - L_max;
+        const float e = exp(shifted);
+        normalizer += e;
+        probs[i] = e;
     }
-    std::cout << "\n\n";
-    return 0.0;
+    for (int i = 0; i < score_window; i++)
+    {
+        probs[i] /= static_cast<float>(normalizer);
+        score += probs[i] / probs[0] / score_window;
+    }
+
+    return score;
 }
 
 int main() {
@@ -200,11 +221,6 @@ int main() {
 
         // sample the next token
         {
-            float* logits = llama_get_logits(ctx);
-            const std::span logits_view(logits, vocab->n_tokens());
-            // print_best_token(logits_view, vocab);
-            get_model_confidence_score(logits_view);
-
             new_token_id = llama_sampler_sample(smpl, ctx, -1);
 
             // is it an end of generation?
@@ -219,8 +235,13 @@ int main() {
                 return 1;
             }
             std::string s(buf, n);
-            printf("%s", s.c_str());
+            // printf("%s", s.c_str());
             fflush(stdout);
+
+            float* logits = llama_get_logits(ctx);
+            const std::span logits_view(logits, vocab->n_tokens());
+            // print_best_token(logits_view, vocab);
+            std::cout << "\ntoken: \'" << s.c_str() << "\', score: " << get_model_confidence_score(logits_view) << "\n";
 
             // prepare the next batch with the sampled token
             batch = llama_batch_get_one(&new_token_id, 1);
