@@ -12,12 +12,12 @@ jchiang@Jonathans-MacBook-Pro model_confidence % ./cmake-build-debug/model_confi
 .......................................................................................
 > 2 + 2 = 
 4
-Average model confidence score: 0.98%
+Average model confidence score: 0.98
 jchiang@Jonathans-MacBook-Pro model_confidence % ./cmake-build-debug/model_confidence -m ./qwen2.5-7b/qwen2.5-7b-instruct-q8_0-00001-of-00003.gguf
 .......................................................................................
 > 53982 * 8889 = 
 478209022
-Average model confidence score: 0.946323% 
+Average model confidence score: 0.946323
 ```
 so the model is more "confident" about the calculation `2 + 2 = 4` rather than the more complex calculation (which is the wrong result)
 
