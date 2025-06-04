@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <iostream>
+#include <numeric>
 #include <span>
 
 llama_model* init_model()
@@ -159,8 +160,10 @@ double get_model_confidence_score(const std::span<float> logits_view)
 }
 
 int main() {
-    const std::string prompt = "2 + 2 = ";
+    const std::string prompt = "The 16th president of the United States was ";
     constexpr int num_tokens_to_predict = 3;
+    std::vector<double> confidence_scores(num_tokens_to_predict);
+    confidence_scores.reserve(num_tokens_to_predict);
 
     // load dynamic backends
     ggml_backend_load_all();
@@ -235,13 +238,18 @@ int main() {
                 return 1;
             }
             std::string s(buf, n);
-            // printf("%s", s.c_str());
+            printf("%s", s.c_str());
             fflush(stdout);
 
             float* logits = llama_get_logits(ctx);
             const std::span logits_view(logits, vocab->n_tokens());
             // print_best_token(logits_view, vocab);
-            std::cout << "\ntoken: \'" << s.c_str() << "\', score: " << get_model_confidence_score(logits_view) << "\n";
+            const double confidence_score = get_model_confidence_score(logits_view);
+            // std::cout << "\ntoken: \'" << s.c_str() << "\', score: " << confidence_score << "\n";
+            // should be the number of tokens generated after the prompt; range from 0 to num_tokens_to_predict - 1
+            const int curr_gen_idx = n_pos - n_prompt;
+            // the main attraction
+            confidence_scores[curr_gen_idx] = get_model_confidence_score(logits_view);
 
             // prepare the next batch with the sampled token
             batch = llama_batch_get_one(&new_token_id, 1);
@@ -265,6 +273,10 @@ int main() {
     llama_sampler_free(smpl);
     llama_free(ctx);
     llama_model_free(model);
+
+    const double score_sum = std::accumulate(confidence_scores.begin(), confidence_scores.end(), 0.0);
+    const double average_score = score_sum / static_cast<double>(confidence_scores.size());
+    std::cout << "Average model confidence score: " << average_score;
 
     return 0;
 }

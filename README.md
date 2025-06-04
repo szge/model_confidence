@@ -10,9 +10,12 @@ intuition: tighter distribution = more confidence, wider distribution = less con
 
 
 TODO:
-- add executable to makefile
-- accept command-line arguments (model path, window, input string)
-- benchmark (full logit sort vs top n)
+- [x] collect average over tokens
+- [ ] add executable to makefile
+- [ ] accept command-line arguments (model path, window, input string)
+- [ ] benchmark (full logit sort vs top n)
+- [ ] display generated tokens with confidence score
+- [ ] add prompt templating
 
 
 ### Instructions
