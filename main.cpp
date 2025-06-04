@@ -7,6 +7,12 @@
 #include <numeric>
 #include <span>
 
+static void print_usage(int, char ** argv) {
+    printf("\nexample usage:\n");
+    printf("\n    %s -m model.gguf\n", argv[0]);
+    printf("\n");
+}
+
 llama_model* init_model()
 {
     const std::string model_path = "./qwen2.5-7b/qwen2.5-7b-instruct-q8_0-00001-of-00003.gguf";
@@ -141,7 +147,7 @@ double get_model_confidence_score(const std::span<float> logits_view)
     const float L_max = top_n_logits[0]; // use max logit for numerical stability
 
     double normalizer = 0.0; // double for precision
-    double score = 0.0;
+    double score = 1.0;
     for (int i = 0; i < score_window; i++)
     {
         const float shifted = top_n_logits[i] - L_max;
@@ -152,15 +158,40 @@ double get_model_confidence_score(const std::span<float> logits_view)
     for (int i = 0; i < score_window; i++)
     {
         probs[i] /= static_cast<float>(normalizer);
-        score += probs[i] / probs[0] / score_window;
+        score -= probs[i] / probs[0] / score_window;
     }
 
     return score;
 }
 
-int main() {
-    const std::string prompt = "The 16th president of the United States was ";
+int main(int argc, char** argv) {
+    std::string model_path = "./qwen2.5-7b/qwen2.5-7b-instruct-q8_0-00001-of-00003.gguf";
     std::vector<double> confidence_scores {};
+
+    // parse command line args
+    for (int i = 1; i < argc; i++) {
+        try {
+            if (strcmp(argv[i], "-m") == 0) {
+                if (i + 1 < argc) {
+                    model_path = argv[++i];
+                } else {
+                    print_usage(argc, argv);
+                    return 1;
+                }
+            } else {
+                print_usage(argc, argv);
+                return 1;
+            }
+        } catch (std::exception & e) {
+            fprintf(stderr, "error: %s\n", e.what());
+            print_usage(argc, argv);
+            return 1;
+        }
+    }
+    if (model_path.empty()) {
+        print_usage(argc, argv);
+        return 1;
+    }
 
     // only print errors
     llama_log_set([](enum ggml_log_level level, const char * text, void * /* user_data */) {
@@ -262,7 +293,7 @@ int main() {
         // On the very first turn, inject a system prompt
         if (messages.empty()) {
             // we need strdup since we free later
-            messages.push_back({"system", strdup("You are a helpful assistant that always replies concisely. Only reply with the direct answer to the question, without asking follow ups. Keep your answer as short as possible.")});
+            messages.push_back({"system", strdup("You are a helpful assistant that always replies concisely. Only reply with the direct answer to the question, without asking follow ups. Keep your answer as short as possible. Always attempt to respond.")});
             int new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
             if (new_len > (int)formatted.size()) {
                 formatted.resize(new_len);
